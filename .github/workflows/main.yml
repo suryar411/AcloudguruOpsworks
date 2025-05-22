@@ -1,0 +1,26 @@
+name: Generate JSON
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_disks:
+        description: 'JSON array of data disks'
+        required: true
+        default: '[{"name": "TESTAPP001-Data-00", "storage_account_type": "StandardSSD_LRS", "size_gb": 128, "lun": 0, "caching": "ReadOnly", "create_option": "Empty", "zone": null}]'
+
+jobs:
+  generate-json:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Set up PowerShell
+      uses: actions/setup-powershell@v1
+
+    - name: Generate JSON file
+      run: |
+        $DataDisks = ConvertFrom-Json '${{ github.event.inputs.data_disks }}'
+        .\GenerateJson.ps1 -DataDisks $DataDisks
+      shell: pwsh
