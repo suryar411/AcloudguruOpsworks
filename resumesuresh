@@ -1,0 +1,3411 @@
+# main.tf-------------------------------------------------------------------------------------------------------------------
+# Pre-Reqs
+terraform {
+  backend "azurerm" {
+    key                  = "AZUR-P-1-AZUR-RG-1.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+module "azurerm-provider" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/azurerm-provider?ref=v3.0.1"
+}
+
+# Subscription ID
+provider "azurerm" {
+  skip_provider_registration = true
+  subscription_id            = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+  features {}
+}
+
+# VNET
+locals {
+  vnet_resoure_group_name                    = "AZUR-P-1-AZUR-RG-1"
+  vnet_name                                  = "AZUR-P-1-AZUR-VN-1"
+  vnet_location                              = "westus2"
+  vnet_address_space                         = "10.65.4.0/22"
+  mgmt_subnet_address_space                  = "10.65.4.0/24"
+  network_virtual_appliance_load_balancer_ip = "10.65.4.180"
+}
+
+#Subnets
+locals {
+  subnets = {
+    for type in distinct([for subnet in jsondecode(file("subnets.json")) : subnet.type]) : type => {
+      for subnet in jsondecode(file("subnets.json")) : subnet.map_key => subnet if subnet.type == type
+    }
+  }
+}
+
+# --------------------------------------------------------------------------------------
+# Create RG, VNet and Subnets
+module "landing_zone" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/landing-zone-core?ref=v3.0.0"
+
+  resource_group_name              = local.vnet_resoure_group_name
+  virtual_network_name             = local.vnet_name
+  location                         = local.vnet_location
+  virtual_network_address_space    = local.vnet_address_space
+  management_subnets_address_space = local.mgmt_subnet_address_space # For Prod subscription only
+  custom_subnets_map               = local.subnets
+  service_endpoints                = ["Microsoft.Storage"]
+  ddos_protection_plan_id          = "/subscriptions/3f06c9b1-28ae-4458-a1a7-a18a39e9603e/resourceGroups/IFSB-P-1-SOSG-RG-1/providers/Microsoft.Network/ddosProtectionPlans/IFSB-P-1-SOSG-DP-1"
+  vnet_network_group_id            = "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-1/networkGroups/VNET_Production"
+}
+
+# --------------------------------------------------------------------------------------
+# Create Route Tables and associate subnets to them
+module "prod_route_table_standard" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  route_table_name                           = "StandardSubnet-Outbound"
+  resource_group_name                        = module.landing_zone.resource_group_name
+  location                                   = local.vnet_location
+  network_virtual_appliance_load_balancer_ip = "10.65.4.180"
+  virtual_network_address_space              = local.vnet_address_space
+  route_table_type                           = "prod_standard"
+  subnet_map_for_association                 = module.landing_zone.custom_subnets["standard"]
+}
+
+module "prod_route_table_apgw" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  route_table_name                           = "ApplicationGatewaySubnet-Outbound"
+  resource_group_name                        = module.landing_zone.resource_group_name
+  location                                   = local.vnet_location
+  network_virtual_appliance_load_balancer_ip = "10.65.4.180"
+  virtual_network_address_space              = local.vnet_address_space
+  route_table_type                           = "prod_app_gateway"
+  subnet_map_for_association                 = { for k, v in module.landing_zone.mgmt_subnets : k => v if k == "ApplicationGatewaySubnet" || k == "ApplicationGatewayV2Subnet" }
+
+  custom_routes_with_nexthop = [
+    {
+      name                   = "To-A-10.65.44.0-22" # AZUR-P-1-AZUR-VN-4
+      address_prefix         = "10.65.44.0/22"
+      next_hop_type          = "VirtualAppliance"
+      next_hop_in_ip_address = "10.65.4.180"
+    },
+    {
+      name                   = "To-A-10.65.72.0-22" # AZUR-P-1-AZUR-VN-5
+      address_prefix         = "10.65.72.0/22"
+      next_hop_type          = "VirtualAppliance"
+      next_hop_in_ip_address = "10.65.4.180"
+    },
+    {
+      name                   = "To-A-10.64.104.0-22" # AZUR-P-1-AZUR-VN-10
+      address_prefix         = "10.64.104.0/22"
+      next_hop_type          = "VirtualAppliance"
+      next_hop_in_ip_address = "10.65.4.180"
+    },
+    {
+      name                   = "To-A-10.64.108.0-22" # AZUR-P-1-AZUR-VN-11
+      address_prefix         = "10.64.108.0/22"
+      next_hop_type          = "VirtualAppliance"
+      next_hop_in_ip_address = "10.65.4.180"
+    },
+    {
+      name                   = "To-A-10.64.64.0-22" # AZUR-P-1-AZUR-VN-12
+      address_prefix         = "10.64.64.0/22"
+      next_hop_type          = "VirtualAppliance"
+      next_hop_in_ip_address = "10.65.4.180"
+    },
+    {
+      name                   = "To-A-10.64.80.0-21" # AZUR-P-1-AZUR-VN-13
+      address_prefix         = "10.64.80.0/21"
+      next_hop_type          = "VirtualAppliance"
+      next_hop_in_ip_address = "10.65.4.180"
+    },
+    {
+      name                   = "To-A-10.64.88.0-21" # AZUR-P-1-AZUR-VN-14
+      address_prefix         = "10.64.88.0/21"
+      next_hop_type          = "VirtualAppliance"
+      next_hop_in_ip_address = "10.65.4.180"
+    },
+    {
+      name                   = "To-A-10.65.100.0-22" # AZUR-P-1-AZUR-VN-8
+      address_prefix         = "10.65.100.0/22"
+      next_hop_type          = "VirtualAppliance"
+      next_hop_in_ip_address = "10.65.4.180"
+    },
+  ]
+}
+
+module "pa_untrust_outbound_route_table" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  route_table_name                           = "PaloAltoUntrustSubnet-Outbound"
+  resource_group_name                        = module.landing_zone.resource_group_name
+  network_virtual_appliance_load_balancer_ip = "10.65.4.180"
+  location                                   = local.vnet_location
+  virtual_network_address_space              = local.vnet_address_space
+  route_table_type                           = "prod_pa_untrust"
+  subnet_map_for_association                 = { for k, v in module.landing_zone.mgmt_subnets : k => v if k == "PaloAltoUntrustSubnet" }
+}
+
+# --------------------------------------------------------------------------------------
+# Route Table - SQL Managed Instance Subnet
+# --------------------------------------------------------------------------------------
+module "prod_route_table_sqlmi" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.1.0"
+
+  resource_group_name                        = module.landing_zone.resource_group_name
+  route_table_name                           = "SQLMISubnet-Outbound"
+  network_virtual_appliance_load_balancer_ip = "10.65.4.180"
+  location                                   = local.vnet_location
+  virtual_network_address_space              = local.vnet_address_space
+  route_table_type                           = "prod_standard"
+  subnet_map_for_association                 = try(module.landing_zone.custom_subnets["sqlmi"], {})
+}
+
+# --------------------------------------------------------------------------------------
+# Route Table - API Management Subnet
+# --------------------------------------------------------------------------------------
+module "prod_route_table_apim" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.1.0"
+
+  resource_group_name                        = module.landing_zone.resource_group_name
+  route_table_name                           = "APIMgmtSubnet-Outbound"
+  network_virtual_appliance_load_balancer_ip = "10.65.4.180"
+  location                                   = local.vnet_location
+  virtual_network_address_space              = local.vnet_address_space
+  route_table_type                           = "prod_standard"
+  subnet_map_for_association                 = try(module.landing_zone.custom_subnets["apim"], {})
+}
+
+# --------------------------------------------------------------------------------------
+
+module "virtual_hub_connection" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/virtual-hub-connection?ref=v5.x"
+
+  virtual_network_id = module.landing_zone.virtual_network_id
+  virtual_hub_id     = "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-100/providers/Microsoft.Network/virtualHubs/AZUR-P-1-AZUR-VH-10"
+}
+
+module "peering_mesh" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/vnet-peering-mesh?ref=v1.0.0"
+
+  virtual_network_resource_ids = [
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-1/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-1",
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-6/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-3",
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-4/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-4",
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-5/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-5",
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-7/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-6",
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-9/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-9",
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-10/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-10",
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-11/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-11",
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-12/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-12",
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-13/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-13",
+    "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-14/providers/Microsoft.Network/virtualNetworks/AZUR-P-1-AZUR-VN-14",
+  ]
+}
+
+Inspec.yml
+name: AZUR-P-1-AZUR-RG-1
+version: 1.0.0
+inspec_version: "~> 4"
+depends:
+  - name: inspec-azure
+    git: https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/inspec-azure
+supports:
+  - platform: azure
+
+Outputs.tf
+output "rg_name" {
+  value = local.vnet_resoure_group_name
+}
+
+output "vnet_id" {
+  value = module.landing_zone.virtual_network_id
+}
+
+output "mgmt_subnets" {
+  value = module.landing_zone.mgmt_subnets
+}
+
+output "custom_subnets" {
+  value = module.landing_zone.custom_subnets
+}
+
+output "inspec_landing_zone_core" {
+  value = [module.landing_zone.inspec]
+}
+
+output "inspec_route_table" {
+  value = [
+    module.prod_route_table_standard.inspec,
+    module.prod_route_table_apgw.inspec,
+    module.pa_untrust_outbound_route_table.inspec,
+  ]
+}
+
+pipeline.yml
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: Azure Product/Pipeline.Templates
+      ref: refs/tags/v3.4.0
+
+trigger:
+  branches:
+    include:
+      - master
+  paths:
+    include:
+      - deployments/production/network/AZUR-P-1-AZUR-RG-1
+
+parameters:
+  - name: bypassHours
+    type: boolean
+    default: false
+
+stages:
+  - template: terraform-deployment.yml@templates
+    parameters:
+      workingDirectory: deployments/production/network/AZUR-P-1-AZUR-RG-1
+      stage: Production
+      bypassHours: ${{ parameters.bypassHours }}
+      terraformVersion: 1.13.4
+      preApplySteps:
+        - template: ../../../../pipelines/createChange.yml
+      postApplySteps:
+        - template: ../../../../pipelines/closeChange.yml
+        - template: ../../../../pipelines/closeTask.yml
+Subnets.json
+
+[
+  {
+    "map_key": "S-10.65.4.224-28",
+    "name": "S-10.65.4.224-28",
+    "address_prefix": "10.65.4.224/28",
+    "resource_name_reference": "F5LB",
+    "application_service_number": "AS0000000773",
+    "business_application_number": "APM0001327",
+    "type": "standard",
+    "nsg_type": "p-std-sn",
+    "service_endpoints": [],
+    "enforce_private_link_endpoint_network_policies": false,
+    "delegation": []
+  },
+  {
+    "map_key": "DiagnosticSubnet",
+    "name": "DiagnosticSubnet",
+    "address_prefix": "10.65.4.240/28",
+    "resource_name_reference": "AZUR",
+    "application_service_number": "AS0000001229",
+    "business_application_number": "APM0001509",
+    "type": "standard",
+    "nsg_type": "p-std-sn",
+    "service_endpoints": [],
+    "enforce_private_link_endpoint_network_policies": false,
+    "delegation": []
+  },
+  {
+    "map_key": "S-10.65.5.0-28",
+    "name": "S-10.65.5.0-28",
+    "address_prefix": "10.65.5.0/28",
+    "resource_name_reference": "EDWL",
+    "application_service_number": "AS0000000695",
+    "business_application_number": "APM0001301",
+    "type": "standard",
+    "nsg_type": "p-std-sn",
+    "service_endpoints": [],
+    "enforce_private_link_endpoint_network_policies": false,
+    "delegation": []
+  },
+
+
+
+
+
+
+
+Vwan RG-100
+-----------------------------------------------------------------------------------------------------------------------------------
+Blue.tf
+resource "azurerm_virtual_wan" "westus2_blue" {
+  name                           = "AZUR-P-1-AZUR-VW-10"
+  resource_group_name            = azurerm_resource_group.rg.name
+  location                       = azurerm_resource_group.rg.location
+  allow_branch_to_branch_traffic = false
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+resource "azurerm_virtual_hub" "westus2_blue" {
+  name                                   = "AZUR-P-1-AZUR-VH-10"
+  resource_group_name                    = azurerm_resource_group.rg.name
+  location                               = "westus2"
+  virtual_wan_id                         = azurerm_virtual_wan.westus2_blue.id
+  address_prefix                         = "10.65.254.0/23"
+  hub_routing_preference                 = "ASPath"
+  virtual_router_auto_scale_min_capacity = 7
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+resource "azurerm_virtual_hub" "westcentralus_blue" {
+  name                                   = "AZUR-P-1-AZUR-VH-20"
+  resource_group_name                    = azurerm_resource_group.rg.name
+  location                               = "westcentralus"
+  virtual_wan_id                         = azurerm_virtual_wan.westus2_blue.id
+  address_prefix                         = "10.66.254.0/23"
+  hub_routing_preference                 = "ASPath"
+  virtual_router_auto_scale_min_capacity = 7
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+resource "azurerm_virtual_hub" "eastus_blue" {
+  name                   = "AZUR-P-1-AZUR-VH-30"
+  resource_group_name    = azurerm_resource_group.rg.name
+  location               = "eastus"
+  virtual_wan_id         = azurerm_virtual_wan.westus2_blue.id
+  address_prefix         = "10.67.254.0/23"
+  hub_routing_preference = "ASPath"
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+resource "azurerm_express_route_gateway" "westus2_blue" {
+  name                          = "AZUR-P-1-AZUR-VH-10-GW"
+  resource_group_name           = azurerm_resource_group.rg.name
+  location                      = "westus2"
+  virtual_hub_id                = azurerm_virtual_hub.westus2_blue.id
+  scale_units                   = 1
+  allow_non_virtual_wan_traffic = true
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+resource "azurerm_express_route_gateway" "westcentralus_blue" {
+  name                          = "AZUR-P-1-AZUR-VH-20-GW"
+  resource_group_name           = azurerm_resource_group.rg.name
+  location                      = "westcentralus"
+  virtual_hub_id                = azurerm_virtual_hub.westcentralus_blue.id
+  scale_units                   = 1
+  allow_non_virtual_wan_traffic = true
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+resource "azurerm_express_route_gateway" "eastus_blue" {
+  name                          = "AZUR-P-1-AZUR-VH-30-GW"
+  resource_group_name           = azurerm_resource_group.rg.name
+  location                      = "eastus"
+  virtual_hub_id                = azurerm_virtual_hub.eastus_blue.id
+  scale_units                   = 1
+  allow_non_virtual_wan_traffic = true
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+resource "azurerm_express_route_connection" "vh10_seattle" {
+  name                             = "AZUR-P-1-AZUR-VH-10-CN-seattle"
+  express_route_gateway_id         = azurerm_express_route_gateway.westus2_blue.id
+  express_route_circuit_peering_id = azurerm_express_route_circuit_peering.seattle.id
+  routing_weight                   = 200
+}
+
+resource "azurerm_express_route_connection" "vh10_chicago" {
+  name                             = "AZUR-P-1-AZUR-VH-10-CN-chicago"
+  express_route_gateway_id         = azurerm_express_route_gateway.westus2_blue.id
+  express_route_circuit_peering_id = azurerm_express_route_circuit_peering.chicago.id
+  routing_weight                   = 0
+}
+
+resource "azurerm_express_route_connection" "vh20_seattle" {
+  name                             = "AZUR-P-1-AZUR-VH-20-CN-seattle"
+  express_route_gateway_id         = azurerm_express_route_gateway.westcentralus_blue.id
+  express_route_circuit_peering_id = azurerm_express_route_circuit_peering.seattle.id
+  routing_weight                   = 200
+}
+
+resource "azurerm_express_route_connection" "vh20_chicago" {
+  name                             = "AZUR-P-1-AZUR-VH-20-CN-chicago"
+  express_route_gateway_id         = azurerm_express_route_gateway.westcentralus_blue.id
+  express_route_circuit_peering_id = azurerm_express_route_circuit_peering.chicago.id
+  routing_weight                   = 0
+}
+
+resource "azurerm_express_route_connection" "vh30_seattle" {
+  name                             = "AZUR-P-1-AZUR-VH-30-CN-seattle"
+  express_route_gateway_id         = azurerm_express_route_gateway.eastus_blue.id
+  express_route_circuit_peering_id = azurerm_express_route_circuit_peering.seattle.id
+  routing_weight                   = 200
+}
+
+resource "azurerm_express_route_connection" "vh30_chicago" {
+  name                             = "AZUR-P-1-AZUR-VH-30-CN-chicago"
+  express_route_gateway_id         = azurerm_express_route_gateway.eastus_blue.id
+  express_route_circuit_peering_id = azurerm_express_route_circuit_peering.chicago.id
+  routing_weight                   = 0
+}
+
+Min.tf
+terraform {
+  backend "azurerm" {
+    key                  = "AZUR-P-1-AZUR-RG-100.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+module "azurerm-provider" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/azurerm-provider?ref=v3.0.1"
+}
+
+provider "azurerm" {
+  skip_provider_registration = true
+  subscription_id            = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+  features {}
+}
+
+module "tags" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/tags"
+}
+
+resource "azurerm_resource_group" "rg" {
+  name     = "AZUR-P-1-AZUR-RG-100"
+  location = "westus2"
+  tags     = module.tags.AZUR-Prod
+}
+
+resource "azurerm_express_route_circuit" "seattle" {
+  name                     = "AZUR-P-1-AZUR-ER-1"
+  resource_group_name      = azurerm_resource_group.rg.name
+  location                 = "westus2"
+  service_provider_name    = "Equinix"
+  peering_location         = "Seattle"
+  bandwidth_in_mbps        = 2000
+  allow_classic_operations = false
+
+  sku {
+    tier   = "Premium"
+    family = "MeteredData"
+  }
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+resource "azurerm_express_route_circuit_peering" "seattle" {
+  peering_type                  = "AzurePrivatePeering"
+  express_route_circuit_name    = azurerm_express_route_circuit.seattle.name
+  resource_group_name           = azurerm_resource_group.rg.name
+  peer_asn                      = 25500
+  primary_peer_address_prefix   = "10.255.62.64/30"
+  secondary_peer_address_prefix = "10.255.62.68/30"
+  vlan_id                       = 37
+
+  lifecycle {
+    ignore_changes = [microsoft_peering_config]
+  }
+}
+
+resource "azurerm_express_route_circuit" "chicago" {
+  name                     = "AZUR-P-1-AZUR-ER-2"
+  resource_group_name      = azurerm_resource_group.rg.name
+  location                 = "westcentralus"
+  service_provider_name    = "Level 3 Communications - Exchange"
+  peering_location         = "Chicago"
+  bandwidth_in_mbps        = 2000
+  allow_classic_operations = false
+
+  sku {
+    tier   = "Premium"
+    family = "MeteredData"
+  }
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+resource "azurerm_express_route_circuit_peering" "chicago" {
+  peering_type                  = "AzurePrivatePeering"
+  express_route_circuit_name    = azurerm_express_route_circuit.chicago.name
+  resource_group_name           = azurerm_resource_group.rg.name
+  peer_asn                      = 25564
+  primary_peer_address_prefix   = "10.255.126.68/30"
+  secondary_peer_address_prefix = "10.255.126.64/30"
+  vlan_id                       = 35
+
+  lifecycle {
+    ignore_changes = [microsoft_peering_config]
+  }
+}
+
+
+
+2. ------------------------
+Non prod
+terraform {
+  backend "azurerm" {
+    key                  = "AZUR-N-1-AZUR-RG-1.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+module "azurerm-provider" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/azurerm-provider?ref=v3.0.0"
+}
+
+provider "azurerm" {
+  skip_provider_registration = true
+  subscription_id            = "50bfd09a-e376-4e72-86d9-6a493b0e1184"
+  features {}
+}
+
+# VNET
+locals {
+  vnet_resoure_group_name = "AZUR-N-1-AZUR-RG-1"
+  vnet_name               = "AZUR-N-1-AZUR-VN-1"
+  vnet_location           = "westus2"
+  vnet_address_space      = "10.65.16.0/22"
+
+  hub_virtual_network_address_space       = ["10.65.8.0/22"] # AZUR-P-1-AZUR-VN-2 (TransitHub)
+  network_virtual_appliance_address_space = "10.65.8.160/27" # PaloAltoTrustSubnet
+}
+
+# Subnets
+locals {
+  subnets = {
+    for type in distinct([for subnet in jsondecode(file("subnets.json")) : subnet.type]) : type => {
+      for subnet in jsondecode(file("subnets.json")) : subnet.map_key => subnet if subnet.type == type
+    }
+  }
+}
+
+# --------------------------------------------------------------------------------------
+# Create RG, VNet and Subnets
+# --------------------------------------------------------------------------------------
+
+module "landing_zone" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/landing-zone-core?ref=v3.0.0"
+
+  resource_group_name           = local.vnet_resoure_group_name
+  virtual_network_name          = local.vnet_name
+  location                      = local.vnet_location
+  virtual_network_address_space = local.vnet_address_space
+  custom_subnets_map            = local.subnets
+  vnet_network_group_id         = "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/networkGroups/VNET_Non-Production"
+}
+
+# Create Route Tables and associate subnets to them
+
+module "non_prod_route_table_standard" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  resource_group_name                        = module.landing_zone.resource_group_name
+  route_table_name                           = "StandardSubnet-Outbound"
+  network_virtual_appliance_load_balancer_ip = "10.65.8.180"
+  location                                   = local.vnet_location
+  virtual_network_address_space              = local.vnet_address_space
+  hub_virtual_network_address_space          = local.hub_virtual_network_address_space
+  network_virtual_appliance_address_space    = local.network_virtual_appliance_address_space
+  route_table_type                           = "spoke_standard"
+  subnet_map_for_association                 = module.landing_zone.custom_subnets["standard"]
+}
+
+module "non_prod_route_table_custom_subnet" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  resource_group_name                        = module.landing_zone.resource_group_name
+  route_table_name                           = "StandardCustomSubnet-Outbound"
+  network_virtual_appliance_load_balancer_ip = "10.65.8.180"
+  location                                   = local.vnet_location
+  virtual_network_address_space              = local.vnet_address_space
+  hub_virtual_network_address_space          = local.hub_virtual_network_address_space
+  network_virtual_appliance_address_space    = local.network_virtual_appliance_address_space
+  route_table_type                           = "spoke_standard"
+  subnet_map_for_association                 = module.landing_zone.custom_subnets["standard_custom"]
+}
+
+module "non_prod_route_table_sqlmi_subnet" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  resource_group_name                        = module.landing_zone.resource_group_name
+  route_table_name                           = "${local.subnets.sqlmi["EIMR_MI"].name}-sqlmiSubnet-Outbound"
+  network_virtual_appliance_load_balancer_ip = "10.65.8.180"
+  location                                   = local.vnet_location
+  virtual_network_address_space              = local.vnet_address_space
+  hub_virtual_network_address_space          = local.hub_virtual_network_address_space
+  network_virtual_appliance_address_space    = local.network_virtual_appliance_address_space
+  route_table_type                           = "spoke_sqlmi"
+  subnet_map_for_association = {
+    lookup(local.subnets.sqlmi["EIMR_MI"], "name", null) = {
+      "id"             = module.landing_zone.custom_subnets.sqlmi[local.subnets.sqlmi["EIMR_MI"].name].id
+      "address_prefix" = "N/A"
+    }
+  }
+  custom_routes_without_nexthop = [
+    {
+      name           = "subnet-${replace(local.subnets.sqlmi["EIMR_MI"].address_prefix, "/[.]|//", "-")}-to-vnetlocal"
+      address_prefix = local.subnets.sqlmi["EIMR_MI"].address_prefix
+      next_hop_type  = "VnetLocal"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-Storage"
+      address_prefix = "Storage"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-SqlManagement"
+      address_prefix = "SqlManagement"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-AzureMonitor"
+      address_prefix = "AzureMonitor"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-CorpNetSaw"
+      address_prefix = "CorpNetSaw"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-CorpNetPublic"
+      address_prefix = "CorpNetPublic"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-AzureCloud.westus2"
+      address_prefix = "AzureCloud.westus2"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-AzureCloud.westcentralus"
+      address_prefix = "AzureCloud.westcentralus"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-Storage.westus2"
+      address_prefix = "Storage.westus2"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-Storage.westcentralus"
+      address_prefix = "Storage.westcentralus"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-EventHub.westus2"
+      address_prefix = "EventHub.westus2"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-EventHub.westcentralus"
+      address_prefix = "EventHub.westcentralus"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-AzureActiveDirectory"
+      address_prefix = "AzureActiveDirectory"
+      next_hop_type  = "Internet"
+    },
+    {
+      name           = "Microsoft.Sql-managedInstances_UseOnly_mi-OneDsCollector"
+      address_prefix = "OneDsCollector"
+      next_hop_type  = "Internet"
+    }
+  ]
+}
+
+module "non_prod_route_table_apim_subnet" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+  
+  resource_group_name                        = module.landing_zone.resource_group_name
+  route_table_name                           = "APIMgmtSubnet-Outbound"
+  network_virtual_appliance_load_balancer_ip = "10.65.8.180"
+  location                                   = local.vnet_location
+  virtual_network_address_space              = local.vnet_address_space
+  hub_virtual_network_address_space          = local.hub_virtual_network_address_space
+  network_virtual_appliance_address_space    = local.network_virtual_appliance_address_space
+  route_table_type                           = "spoke_standard"
+  subnet_map_for_association                 = module.landing_zone.custom_subnets["apim"]
+}
+
+# --------------------------------------------------------------------------------------
+# NEW: Missing route table for Internal Application Gateway subnets
+# Uses try() logic - if no internal_appgw subnets exist, subnet_map_for_association will be {}
+# --------------------------------------------------------------------------------------
+module "non_prod_route_table_internal_appgw" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.1.0"
+  
+  resource_group_name                        = module.landing_zone.resource_group_name
+  route_table_name                           = "InternalAppGatewaySubnet-Outbound"
+  network_virtual_appliance_load_balancer_ip = "10.65.8.180"
+  location                                   = local.vnet_location
+  virtual_network_address_space              = local.vnet_address_space
+  hub_virtual_network_address_space          = local.hub_virtual_network_address_space
+  network_virtual_appliance_address_space    = local.network_virtual_appliance_address_space
+  route_table_type                           = "spoke_standard"
+  subnet_map_for_association                 = try(module.landing_zone.custom_subnets["internal_appgw"], {}) # try() returns empty map {} if no internal_appgw subnets exist
+}
+
+output "rg_name" {
+  value       = module.landing_zone.resource_group_name
+  description = "The name for the resource group containing the VNet."
+}
+
+output "vnet_id" {
+  value       = module.landing_zone.virtual_network_id
+  description = "The Azure ID for the virtual network."
+}
+
+output "custom_subnets" {
+  value = module.landing_zone.custom_subnets
+}
+
+output "inspec_landing_zone_core" {
+  value = [module.landing_zone.inspec]
+}
+
+output "inspec_route_table" {
+  value = [
+    module.non_prod_route_table_standard.inspec,
+    module.non_prod_route_table_custom_subnet.inspec,
+    module.non_prod_route_table_sqlmi_subnet.inspec,
+    module.non_prod_route_table_apim_subnet.inspec
+  ]
+}
+
+
+
+
+Secadminrules
+------------------------
+                          {
+  "schema": 1,
+  "security_configuration_name": "nonprod-security-configuration",
+  "location": "WestUS2",
+  "resource_group_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100",
+  "network_manager_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2",
+  "network_intent_policy": [
+    "AllowRulesOnly"
+  ],
+  "rule_collection_name": "nonprod-securityadmin-rule-collection",
+  "network_group_ids": [
+    "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/networkGroups/VNET_Non-Production"
+  ],
+  "security_admin_rules": [
+    {
+      "name": "Allow_Inbound_AzureLoadBalancer",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 1001,
+      "protocol": "Any",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "0-65535"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "ServiceTag",
+          "address_prefix": "AzureLoadBalancer"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_CorporateEnterpriseMgmtaction",
+      "description": "action from Corporate networks",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2001,
+      "protocol": "Any",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "0-65535"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.36.206.0/24"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.46.206.0/24"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.34.252.0/24"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.255.0/24"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.22.186.0/24"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.11.36"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.11.37"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_ServiceFirstMIDServeraction",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2003,
+      "protocol": "Any",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "0-65535"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.10.112/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.88.112/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.66.6.160/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.71.122.192/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.71.122.208/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.124.16/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.124.32/28"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_SecOpsSecurityScanners",
+      "description": "This allows something inbound",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2004,
+      "protocol": "Any",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "0-65535"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.23.124.10"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.26.25.219"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.28.1.232"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.100.25"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.5.208/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.22.126"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.22.127"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.22.128"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.255.42"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.255.43"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.255.44"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.255.48"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.255.49"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.66.13.64/27"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.38.64/27"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.53.64/27"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_Networker",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2005,
+      "protocol": "Any",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "111",
+        "514",
+        "443",
+        "7937-9936"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.35.138.49"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.35.138.50"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.35.138.63"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.116.71"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.64.191.55"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_SystemAdminaction",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2006,
+      "protocol": "Any",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "22",
+        "80",
+        "443",
+        "445",
+        "3389",
+        "5985",
+        "5986"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.68.0/23"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.80.0/23"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.23.122.0/23"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.23.178.0/23"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.24.160.0/19"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.24.200.0/21"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.34.160.0/19"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.34.196.0/22"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.34.200.0/21"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.35.160.0/19"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.35.192.0/21"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.44.160.0/19"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.44.196.0/22"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.44.200.0/21"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.37.160.0/19"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.37.192.0/19"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.47.128.0/17"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.48.0.0/18"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.48.224.0/19"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_SCCM_Servers",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2007,
+      "protocol": "Any",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "135",
+        "137",
+        "445",
+        "80",
+        "443",
+        "10123",
+        "8530",
+        "8531",
+        "88",
+        "389",
+        "636",
+        "1024-5000",
+        "49152-65535"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.36.206.221"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.36.206.206"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.36.206.157"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.36.206.165"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.45.96/27"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.66.5.224/27"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.7.214"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.7.219"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.7.221"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_UnixMgmtScripts",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2008,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "22"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.255.69"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.7.48/28"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_SpaceWalk",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2009,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "80",
+        "443"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.7.16/28"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_ICMP",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2010,
+      "protocol": "Icmp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "0-65535"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_Splunk",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2011,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "8089"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.6.134"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_ESS_Servers",
+      "description": "Allow SQL connections from ESS Servers",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2012,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "1433"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.38.37"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.38.38"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.38.39"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.66.13.148"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.66.13.149"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_DistFileServices",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2013,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "445"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.122.124"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.122.126"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.122.120"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.46.213"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.46.215"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.17.236.164"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.192.3.64"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_SCCM_Internal",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2014,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "49152-65535",
+        "1024-5000",
+        "445",
+        "135"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.64.104.100"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_VISM",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2015,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "80",
+        "443"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.39.132"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.39.133"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.39.134"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.0.0.0/8"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "172.16.0.0/12"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "192.168.0.0/16"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_Employee_HTTPS",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2016,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "443"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.38.0.0/16"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.39.0.0/16"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_CERT",
+      "description": "REQ3423828",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 2017,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "5986"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.37.176/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.67.21.16/28"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_CyberArkaction_1",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 3000,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "22",
+        "135",
+        "139",
+        "445",
+        "1433",
+        "3389",
+        "49152-65535"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.37.0/27"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.37.64/27"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.37.224/27"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.91.160/27"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.91.192/27"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_ELK_action",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 3001,
+      "protocol": "Tcp",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "80",
+        "443",
+        "8080",
+        "8443",
+        "9243"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.71.123.32/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.123.128/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.76.93.32/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.5.96/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.66.6.16/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.65.18.112/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.124.0/28"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.71.123.48/28"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    },
+    {
+      "name": "Allow_Inbound_ACES_Servers",
+      "admin_rule_collection_id": "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-2/securityAdminConfigurations/nonprod-security-configuration/ruleCollections/nonprod-securityadmin-rule-collection",
+      "action": "AlwaysAllow",
+      "direction": "Inbound",
+      "priority": 3002,
+      "protocol": "Any",
+      "source_port_ranges": [
+        "0-65535"
+      ],
+      "destination_port_ranges": [
+        "22",
+        "5985-5986"
+      ],
+      "source": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.169.128/26"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.169.0/26"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.57.0/26"
+        },
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "10.74.58.64/26"
+        }
+      ],
+      "destination": [
+        {
+          "address_prefix_type": "IPPrefix",
+          "address_prefix": "*"
+        }
+      ]
+    }
+  ]
+}
+
+--------------------------------------------
+                          locals {
+  vnet_resource_group_name_westus2  = "AZUR-P-100-AZUR-RG-1"
+  vnet_name_westus2                 = "AZUR-P-100-AZUR-VN-1"
+  vnet_location_westus2             = "westus2"
+  vnet_address_space_westus2        = "10.65.108.0/22"
+  mgmt_subnet_address_space_westus2 = "10.65.108.0/24"
+  nva_lb_ip_westus2                 = "10.65.108.180"
+}
+
+module "landing_zone_westus2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/landing-zone-core?ref=v3.0.0"
+
+  resource_group_name              = local.vnet_resource_group_name_westus2
+  virtual_network_name             = local.vnet_name_westus2
+  location                         = local.vnet_location_westus2
+  virtual_network_address_space    = local.vnet_address_space_westus2
+  management_subnets_address_space = local.mgmt_subnet_address_space_westus2
+  custom_subnets_map = {
+    for type in distinct([for subnet in jsondecode(file("subnets.json")) : subnet.type]) : type => {
+      for subnet in jsondecode(file("subnets.json")) : subnet.map_key => subnet
+      if subnet.type == type && contains([
+        for host_num in range(pow(2, 32 - split("/", local.vnet_address_space_westus2)[1])) : cidrhost(local.vnet_address_space_westus2, host_num)
+      ], cidrhost(subnet.address_prefix, 0))
+    }
+  }
+  service_endpoints = [
+    "Microsoft.AzureActiveDirectory",
+    "Microsoft.AzureCosmosDB",
+    "Microsoft.CognitiveServices",
+    "Microsoft.EventHub",
+    "Microsoft.KeyVault",
+    "Microsoft.ServiceBus",
+    "Microsoft.Sql",
+    "Microsoft.Storage",
+    "Microsoft.Web",
+  ]
+  ddos_protection_plan_id          = "/subscriptions/3f06c9b1-28ae-4458-a1a7-a18a39e9603e/resourceGroups/IFSB-P-1-SOSG-RG-1/providers/Microsoft.Network/ddosProtectionPlans/IFSB-P-1-SOSG-DP-1"
+  vnet_network_group_id         = "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-1/networkGroups/VNET_Production"
+}
+
+module "appgw_route_table_westus2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  route_table_name                           = "ApplicationGatewaySubnet-Outbound"
+  resource_group_name                        = module.landing_zone_westus2.resource_group_name
+  network_virtual_appliance_load_balancer_ip = local.nva_lb_ip_westus2
+  virtual_network_address_space              = local.vnet_address_space_westus2
+  location                                   = local.vnet_location_westus2
+  route_table_type                           = "prod_app_gateway"
+  subnet_map_for_association                 = { for k, v in module.landing_zone_westus2.mgmt_subnets : k => v if k == "ApplicationGatewaySubnet" || k == "ApplicationGatewayV2Subnet" }
+}
+
+module "pa_mgmt_route_table_westus2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  route_table_name                           = "PaloAltoMgmtSubnet-Outbound"
+  resource_group_name                        = module.landing_zone_westus2.resource_group_name
+  network_virtual_appliance_load_balancer_ip = local.nva_lb_ip_westus2
+  virtual_network_address_space              = local.vnet_address_space_westus2
+  location                                   = local.vnet_location_westus2
+  route_table_type                           = "prod_pa_mgmt"
+  subnet_map_for_association                 = { PaloAltoMgmtSubnet = lookup(module.landing_zone_westus2.mgmt_subnets, "PaloAltoMgmtSubnet", null) }
+}
+
+module "pa_untrust_route_table_westus2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  route_table_name                           = "PaloAltoUntrustSubnet-Outbound"
+  resource_group_name                        = module.landing_zone_westus2.resource_group_name
+  network_virtual_appliance_load_balancer_ip = local.nva_lb_ip_westus2
+  virtual_network_address_space              = local.vnet_address_space_westus2
+  location                                   = local.vnet_location_westus2
+  route_table_type                           = "prod_pa_untrust"
+  subnet_map_for_association                 = { PaloAltoUntrustSubnet = lookup(module.landing_zone_westus2.mgmt_subnets, "PaloAltoUntrustSubnet", null) }
+}
+
+module "virtual_hub_connection_westus2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/virtual-hub-connection?ref=v5.x"
+
+  virtual_hub_id     = "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-100/providers/Microsoft.Network/virtualHubs/AZUR-P-1-AZUR-VH-10"
+  virtual_network_id = module.landing_zone_westus2.virtual_network_id
+  nva_ip             = local.nva_lb_ip_westus2
+  spoke_address_space = [
+    "10.63.0.0/22",
+    "10.63.60.0/22" # Chunk reserved for BUIT managed ingress
+  ]
+}
+
+resource "azurerm_private_dns_resolver" "westus2" {
+  name                = "AZUR-P-100-AZUR-PR-1"
+  resource_group_name = module.landing_zone_westus2.resource_group_name
+  location            = local.vnet_location_westus2
+  virtual_network_id  = module.landing_zone_westus2.virtual_network_id
+
+  lifecycle {
+    ignore_changes = [
+      tags,
+    ]
+  }
+}
+
+resource "azurerm_private_dns_resolver_inbound_endpoint" "westus2" {
+  name                    = "in-azur-prod-wus2-001"
+  location                = local.vnet_location_westus2
+  private_dns_resolver_id = azurerm_private_dns_resolver.westus2.id
+
+  ip_configurations {
+    subnet_id                    = module.landing_zone_westus2.custom_subnets.standard["S-10.65.109.0-28"].id
+    private_ip_address           = "10.65.109.4"
+    private_ip_allocation_method = "Static"
+  }
+
+  lifecycle {
+    ignore_changes = [
+      tags,
+    ]
+  }
+}
+
+resource "azurerm_monitor_metric_alert" "private_dns_resolver_westus2_qps_alert" {
+  name                = format("%s Queries Per Second (QPS)", azurerm_private_dns_resolver.westus2.name)
+  resource_group_name = module.landing_zone_westus2.resource_group_name
+  scopes              = [azurerm_private_dns_resolver.westus2.id]
+  description         = "Queries Per Second (QPS) is over 9000." # Max is 10000.
+  frequency           = "PT5M"
+  window_size         = "PT5M"
+  severity            = 0
+
+  criteria {
+    metric_namespace = "Microsoft.Network/dnsResolvers"
+    metric_name      = "QPS"
+    aggregation      = "Average"
+    operator         = "GreaterThanOrEqual"
+    threshold        = "9000"
+  }
+
+  action {
+    action_group_id = module.action-group-email.azurerm_action_group_id
+  }
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+  ----------------------------------------------------------------------
+  module "rg100" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/resource-group?ref=v3.x"
+
+  name                        = "AZUR-P-100-AZUR-RG-100"
+  location                    = "westus2"
+  application_service_number  = module.tags.AZUR-Prod.ApplicationServiceNumber
+  business_application_number = module.tags.AZUR-Prod.BusinessApplicationNumber
+}
+
+module "umi_eventgrid_producer" {
+  source = "git::https://dev.azure.com/facloud/AzureProduct-Modules/_git/user-managed-identity?ref=v1.x"
+
+  name                = "UMI-EventGrid-Producer"
+  location            = module.rg100.location
+  resource_group_name = module.rg100.name
+}
+
+module "umi_policy_pe_dns" {
+  source = "git::https://dev.azure.com/facloud/AzureProduct-Modules/_git/user-managed-identity?ref=v1.x"
+
+  name                = "UMI-Policy-PE-DNS"
+  location            = module.rg100.location
+  resource_group_name = module.rg100.name
+}
+
+
+locals {
+  private_zones = jsondecode(file("${path.module}/json/private-dns-zones/private-dns-zones.json"))
+}
+
+locals {
+  dns_zone = toset(flatten([for key, value in local.private_zones : value.name if can(value.name)]))
+}
+
+resource "azurerm_private_dns_zone" "private_zone" {
+
+  for_each = local.dns_zone
+
+  name                = each.value
+  resource_group_name = module.rg100.name
+
+  lifecycle {
+    ignore_changes = [
+      tags,
+    ]
+  }
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "private_vnet_link_westus2" {
+
+  for_each = local.dns_zone
+
+  name                  = "${each.value}_${module.landing_zone_westus2.virtual_network_name}"
+  resource_group_name   = module.rg100.name
+  private_dns_zone_name = each.value
+  virtual_network_id    = module.landing_zone_westus2.virtual_network_id
+  resolution_policy     = "NxDomainRedirect"
+
+  lifecycle {
+    ignore_changes = [
+      tags,
+    ]
+  }
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "private_vnet_link_westcentralus" {
+
+  for_each = local.dns_zone
+
+  name                  = "${each.value}_${module.landing_zone_westcentralus.virtual_network_name}"
+  resource_group_name   = module.rg100.name
+  private_dns_zone_name = each.value
+  virtual_network_id    = module.landing_zone_westcentralus.virtual_network_id
+  resolution_policy     = "NxDomainRedirect"
+
+  lifecycle {
+    ignore_changes = [
+      tags,
+    ]
+  }
+}
+
+module "event-processor-subscriptions" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/event-processor-subscriptions?ref=v2.x"
+
+  resource_group_id = module.rg100.id
+  system_topic_name = "AZUR-P-100-AZUR-ST-1"
+}
+
+locals {
+  network_manager = {
+    network_manager_prod = {
+      network_manager_name = "AZUR-P-100-AZUR-NM-1"
+      network_group = [
+        {
+          "networkgroup_name" : "VNET_Production",
+          "memberType" : "VirtualNetwork"
+        }
+      ]
+      management_group_ids = [
+        "/providers/Microsoft.Management/managementGroups/DBSE-P-MG-1",
+        "/providers/Microsoft.Management/managementGroups/DBSM-P-MG-1",
+        "/providers/Microsoft.Management/managementGroups/AZUR-P-MG-1",
+        "/providers/Microsoft.Management/managementGroups/CISO-P-MG-1",
+        "/providers/Microsoft.Management/managementGroups/ESSP-P-MG-1",
+        "/providers/Microsoft.Management/managementGroups/EVDI-P-MG-1",
+        "/providers/Microsoft.Management/managementGroups/SSPP-P-MG-1",
+        "/providers/Microsoft.Management/managementGroups/TDDM-P-MG-1",
+        "/providers/Microsoft.Management/managementGroups/TRST-P-MG-1"
+      ]
+    }
+    network_manager_nonprod = {
+      network_manager_name = "AZUR-P-100-AZUR-NM-2"
+      network_group = [
+        {
+          "networkgroup_name" : "VNET_Non-Production",
+          "memberType" : "VirtualNetwork"
+        }
+      ]
+      management_group_ids = [
+        "/providers/Microsoft.Management/managementGroups/DBSE-N-MG-1",
+        "/providers/Microsoft.Management/managementGroups/SSPP-N-MG-1",
+        "/providers/Microsoft.Management/managementGroups/TDDM-N-MG-1",
+        "/providers/Microsoft.Management/managementGroups/DBSM-N-MG-1",
+        "/providers/Microsoft.Management/managementGroups/AZUR-N-MG-1",
+        "/providers/Microsoft.Management/managementGroups/CISO-N-MG-1",
+        "/providers/Microsoft.Management/managementGroups/ESSP-N-MG-1",
+        "/providers/Microsoft.Management/managementGroups/EVDI-N-MG-1",
+        "/providers/Microsoft.Management/managementGroups/TRST-N-MG-1"
+      ]
+    }
+    network_manager_restricted = {
+      network_manager_name = "AZUR-P-100-AZUR-NM-3"
+      network_group = [
+        {
+          "networkgroup_name" : "VNET_Restricted",
+          "memberType" : "VirtualNetwork"
+        }
+      ]
+      management_group_ids = ["/providers/Microsoft.Management/managementGroups/FATCO-MG"]
+    }
+  }
+  securityadmin-rule = {
+    prod-securityadmin-rule = {
+      for sar in [for file in fileset(path.module, "json/security-admin-rules/prod-security-admin-rules.json") : jsondecode(file(file))] : sar.security_configuration_name => sar if sar.schema == 1
+    },
+    nonprod-securityadmin-rule = {
+      for sar in [for file in fileset(path.module, "json/security-admin-rules/nonprod-security-admin-rules.json") : jsondecode(file(file))] : sar.security_configuration_name => sar if sar.schema == 1
+    },
+    restricted-securityadmin-rule = {
+      for sar in [for file in fileset(path.module, "json/security-admin-rules/restricted-security-admin-rules.json") : jsondecode(file(file))] : sar.security_configuration_name => sar if sar.schema == 1
+    }
+  }
+}
+
+module "securityadminrule-networkmanager" {
+  source   = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/network-manager?ref=v2.0.0"
+  for_each = local.network_manager
+
+  name                 = each.value.network_manager_name
+  location             = "westus2"
+  resource_group_id    = "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100"
+  scope_accesses       = ["SecurityAdmin"]
+  management_group_ids = each.value.management_group_ids
+  network_group        = each.value.network_group
+}
+
+module "security-admin-rule-prod" {
+  source   = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/security-admin-rules?ref=v2.x"
+  for_each = local.securityadmin-rule.prod-securityadmin-rule
+
+  security_configuration_name = each.value.security_configuration_name
+  network_manager_id          = each.value.network_manager_id
+  network_intent_policy       = each.value.network_intent_policy
+  rule_collection_name        = each.value.rule_collection_name
+  network_group_ids           = each.value.network_group_ids
+  security_admin_rules        = each.value.security_admin_rules
+
+  depends_on = [module.securityadminrule-networkmanager]
+}
+
+module "security-admin-rule-nonprod" {
+  source   = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/security-admin-rules?ref=v2.x"
+  for_each = local.securityadmin-rule.nonprod-securityadmin-rule
+
+  security_configuration_name = each.value.security_configuration_name
+  network_manager_id          = each.value.network_manager_id
+  network_intent_policy       = each.value.network_intent_policy
+  rule_collection_name        = each.value.rule_collection_name
+  network_group_ids           = each.value.network_group_ids
+  security_admin_rules        = each.value.security_admin_rules
+
+  depends_on = [module.securityadminrule-networkmanager]
+}
+
+module "security-admin-rule-restricted" {
+  source   = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/security-admin-rules?ref=v2.x"
+  for_each = local.securityadmin-rule.restricted-securityadmin-rule
+
+  security_configuration_name = each.value.security_configuration_name
+  network_manager_id          = each.value.network_manager_id
+  network_intent_policy       = each.value.network_intent_policy
+  rule_collection_name        = each.value.rule_collection_name
+  network_group_ids           = each.value.network_group_ids
+  security_admin_rules        = each.value.security_admin_rules
+
+  depends_on = [module.securityadminrule-networkmanager]
+}
+
+data "azurerm_role_definition" "subscription_scoped_fa_reader" {
+  name  = "FA-Reader"
+  scope = "/subscriptions/${split("/", module.rg100.id)[2]}"
+}
+
+resource "azurerm_role_assignment" "rg_SP-AZUR-NPrd_fa_reader" {
+  scope              = module.rg100.id
+  role_definition_id = data.azurerm_role_definition.subscription_scoped_fa_reader.id
+  principal_id       = "f34d9b23-fd08-4596-9cc6-a399ac0eca8d" # Object ID of SP-AZUR-NPrd
+}
+
+data "azurerm_role_definition" "subscription_scoped_fa_roleassigner" {
+  name  = "FA-RoleAssigner"
+  scope = "/subscriptions/${split("/", module.rg100.id)[2]}"
+}
+
+resource "azurerm_role_assignment" "privatednszone-azmk8s-westus2_SP-AZUR-NPrd_FA-RoleAssigner" {
+  scope              = "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/privateDnsZones/privatelink.westus2.azmk8s.io"
+  role_definition_id = data.azurerm_role_definition.subscription_scoped_fa_roleassigner.id
+  principal_id       = "f34d9b23-fd08-4596-9cc6-a399ac0eca8d" # Object ID of SP-AZUR-NPrd
+}
+
+resource "azurerm_role_assignment" "privatednszone-azmk8s-westcentralus_SP-AZUR-NPrd_FA-RoleAssigner" {
+  scope              = "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/privateDnsZones/privatelink.westcentralus.azmk8s.io"
+  role_definition_id = data.azurerm_role_definition.subscription_scoped_fa_roleassigner.id
+  principal_id       = "f34d9b23-fd08-4596-9cc6-a399ac0eca8d" # Object ID of SP-AZUR-NPrd
+}
+
+resource "azurerm_role_assignment" "privatednszone-azmk8s-eastus_SP-AZUR-NPrd_FA-RoleAssigner" {
+  scope              = "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/privateDnsZones/privatelink.eastus.azmk8s.io"
+  role_definition_id = data.azurerm_role_definition.subscription_scoped_fa_roleassigner.id
+  principal_id       = "f34d9b23-fd08-4596-9cc6-a399ac0eca8d" # Object ID of SP-AZUR-NPrd
+}
+
+resource "azurerm_arc_private_link_scope" "azure_arc_private_link_scope" {
+  name                = "azure-arc-private-link-scope-01"
+  resource_group_name = module.rg100.name
+  location            = module.rg100.location
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+
+output "AZUR-P-100-AzureSub-100-private-DNS-zones" {
+  value = local.dns_zone
+}
+                  ---------------------------------
+
+                  locals {
+  vnet_resource_group_name_westcentralus  = "AZUR-P-100-AZUR-RG-2"
+  vnet_name_westcentralus                 = "AZUR-P-100-AZUR-VN-2"
+  vnet_location_westcentralus             = "westcentralus"
+  vnet_address_space_westcentralus        = "10.66.108.0/22"
+  mgmt_subnet_address_space_westcentralus = "10.66.108.0/24"
+  nva_lb_ip_westcentralus                 = "10.66.108.180"
+}
+
+module "landing_zone_westcentralus" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/landing-zone-core?ref=v3.0.0"
+
+  resource_group_name              = local.vnet_resource_group_name_westcentralus
+  virtual_network_name             = local.vnet_name_westcentralus
+  location                         = local.vnet_location_westcentralus
+  virtual_network_address_space    = local.vnet_address_space_westcentralus
+  management_subnets_address_space = local.mgmt_subnet_address_space_westcentralus
+  custom_subnets_map = {
+    for type in distinct([for subnet in jsondecode(file("subnets.json")) : subnet.type]) : type => {
+      for subnet in jsondecode(file("subnets.json")) : subnet.map_key => subnet
+      if subnet.type == type && contains([
+        for host_num in range(pow(2, 32 - split("/", local.vnet_address_space_westcentralus)[1])) : cidrhost(local.vnet_address_space_westcentralus, host_num)
+      ], cidrhost(subnet.address_prefix, 0))
+    }
+  }
+  service_endpoints = [
+    "Microsoft.AzureActiveDirectory",
+    "Microsoft.AzureCosmosDB",
+    "Microsoft.CognitiveServices",
+    "Microsoft.EventHub",
+    "Microsoft.KeyVault",
+    "Microsoft.ServiceBus",
+    "Microsoft.Sql",
+    "Microsoft.Storage",
+    "Microsoft.Web",
+  ]
+  ddos_protection_plan_id          = "/subscriptions/3f06c9b1-28ae-4458-a1a7-a18a39e9603e/resourceGroups/IFSB-P-1-SOSG-RG-1/providers/Microsoft.Network/ddosProtectionPlans/IFSB-P-1-SOSG-DP-1"
+  vnet_network_group_id         = "/subscriptions/2c20e80b-16ba-4abb-880b-1b506469b3c6/resourceGroups/AZUR-P-100-AZUR-RG-100/providers/Microsoft.Network/networkManagers/AZUR-P-100-AZUR-NM-1/networkGroups/VNET_Production"
+}
+
+module "appgw_route_table_westcentralus" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  route_table_name                           = "ApplicationGatewaySubnet-Outbound"
+  resource_group_name                        = module.landing_zone_westcentralus.resource_group_name
+  network_virtual_appliance_load_balancer_ip = local.nva_lb_ip_westcentralus
+  virtual_network_address_space              = local.vnet_address_space_westcentralus
+  location                                   = local.vnet_location_westcentralus
+  route_table_type                           = "prod_app_gateway"
+  subnet_map_for_association                 = { for k, v in module.landing_zone_westcentralus.mgmt_subnets : k => v if k == "ApplicationGatewaySubnet" || k == "ApplicationGatewayV2Subnet" }
+}
+
+module "pa_mgmt_route_table_westcentralus" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  route_table_name                           = "PaloAltoMgmtSubnet-Outbound"
+  resource_group_name                        = module.landing_zone_westcentralus.resource_group_name
+  network_virtual_appliance_load_balancer_ip = local.nva_lb_ip_westcentralus
+  virtual_network_address_space              = local.vnet_address_space_westcentralus
+  location                                   = local.vnet_location_westcentralus
+  route_table_type                           = "prod_pa_mgmt"
+  subnet_map_for_association                 = { PaloAltoMgmtSubnet = lookup(module.landing_zone_westcentralus.mgmt_subnets, "PaloAltoMgmtSubnet", null) }
+}
+
+module "pa_untrust_route_table_westcentralus" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/route-table?ref=v5.0.0"
+
+  route_table_name                           = "PaloAltoUntrustSubnet-Outbound"
+  resource_group_name                        = module.landing_zone_westcentralus.resource_group_name
+  network_virtual_appliance_load_balancer_ip = local.nva_lb_ip_westcentralus
+  virtual_network_address_space              = local.vnet_address_space_westcentralus
+  location                                   = local.vnet_location_westcentralus
+  route_table_type                           = "prod_pa_untrust"
+  subnet_map_for_association                 = { PaloAltoUntrustSubnet = lookup(module.landing_zone_westcentralus.mgmt_subnets, "PaloAltoUntrustSubnet", null) }
+}
+
+module "virtual_hub_connection_westcentralus" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/virtual-hub-connection?ref=v5.x"
+
+  virtual_hub_id     = "/subscriptions/e63b08c3-d314-48d8-b10a-c58199bb78b1/resourceGroups/AZUR-P-1-AZUR-RG-100/providers/Microsoft.Network/virtualHubs/AZUR-P-1-AZUR-VH-20"
+  virtual_network_id  = module.landing_zone_westcentralus.virtual_network_id
+  nva_ip              = local.nva_lb_ip_westcentralus
+  spoke_address_space = []
+}
+
+resource "azurerm_private_dns_resolver" "westcentralus" {
+  name                = "AZUR-P-100-AZUR-PR-2"
+  resource_group_name = module.landing_zone_westcentralus.resource_group_name
+  location            = local.vnet_location_westcentralus
+  virtual_network_id  = module.landing_zone_westcentralus.virtual_network_id
+
+  lifecycle {
+    ignore_changes = [
+      tags,
+    ]
+  }
+}
+
+resource "azurerm_private_dns_resolver_inbound_endpoint" "westcentralus" {
+  name                    = "in-azur-prod-wcus-001"
+  location                = local.vnet_location_westcentralus
+  private_dns_resolver_id = azurerm_private_dns_resolver.westcentralus.id
+
+  ip_configurations {
+    subnet_id                    = module.landing_zone_westcentralus.custom_subnets.standard["S-10.66.109.0-28"].id
+    private_ip_address           = "10.66.109.4"
+    private_ip_allocation_method = "Static"
+  }
+
+  lifecycle {
+    ignore_changes = [
+      tags,
+    ]
+  }
+}
+
+resource "azurerm_monitor_metric_alert" "private_dns_resolver_westcentralus_qps_alert" {
+  name                = format("%s Queries Per Second (QPS)", azurerm_private_dns_resolver.westcentralus.name)
+  resource_group_name = module.landing_zone_westcentralus.resource_group_name
+  scopes              = [azurerm_private_dns_resolver.westcentralus.id]
+  description         = "Queries Per Second (QPS) is over 9000."
+  frequency           = "PT5M"
+  window_size         = "PT5M"
+  severity            = 0
+
+  criteria {
+    metric_namespace = "Microsoft.Network/dnsResolvers"
+    metric_name      = "QPS"
+    aggregation      = "Average"
+    operator         = "GreaterThanOrEqual"
+    threshold        = "9000"
+  }
+
+  action {
+    action_group_id = module.action-group-email.azurerm_action_group_id
+  }
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
+}
+------------------------------
+  module "resource_group" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/resource-group?ref=v3.x"
+
+  name                        = "AZUR-P-100-ENMO-RG-1"
+  location                    = "westus2"
+  application_service_number  = module.tags.ENMO-Prod.ApplicationServiceNumber
+  business_application_number = module.tags.ENMO-Prod.BusinessApplicationNumber
+}
+
+# List of action groups to be applied to alert rules
+locals {
+  action_group_set = [
+    {
+      id = module.action-group-email.azurerm_action_group_id
+    }
+  ]
+}
+
+# Action Group - APT email
+module "action-group-email" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/action-group-email?ref=v1.0.0"
+
+  resource_group_name = module.resource_group.name
+}
+---------------------------------------------
+  # --------------------------------------------------------------------------------------------------------------------
+# Pre-Reqs--
+terraform {
+  backend "azurerm" {
+    key                  = "AZUR-P-1-SOSG-RG-1.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+module "azurerm-provider" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/azurerm-provider?ref=v3.0.0"
+}
+
+provider "azurerm" {
+  #version                    = "=2.21.0"
+  skip_provider_registration = true
+  subscription_id            = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+  storage_use_azuread        = true
+  features {}
+}
+
+data "terraform_remote_state" "network_data_rg1" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-1.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg2" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-2.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg4" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-4.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg5" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-5.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg6" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-6.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg7" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-7.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg8" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-8.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg9" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-9.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg10" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-10.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg11" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-11.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg12" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-12.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg13" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-13.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg14" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-14.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "terraform_remote_state" "network_data_rg999" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-999.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg1" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg1.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg1.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg1.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg2" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg2.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg2.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg2.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg4" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg4.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg4.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg4.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg5" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg5.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg5.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg5.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westcentral_rg6" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg6.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg6.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg6.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_eastus_rg7" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg7.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg7.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg7.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg8" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg8.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg8.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg8.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westcentral_rg9" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg9.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg9.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg9.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg10" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg10.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg10.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg10.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg11" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg11.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg11.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg11.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg12" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg12.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg12.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg12.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg13" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg13.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg13.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg13.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg14" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg14.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg14.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg14.outputs.rg_name
+}
+
+data "azurerm_virtual_network" "vnet_westus2_rg999" {
+  name                = element(split("/", data.terraform_remote_state.network_data_rg999.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_rg999.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_rg999.outputs.rg_name
+}
+
+module "tags" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/tags"
+}
+
+module "resource_group" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/resource-group?ref=v1.2.0"
+
+  name     = "AZUR-P-1-SOSG-RG-1"
+  location = "westus2"
+
+  tags = module.tags.SOSG-Prod
+}
+
+resource "azurerm_role_assignment" "fa_algosec_reader-data-access" {
+  scope                = module.resource_group.id
+  role_definition_name = "Reader and Data Access"
+
+  # The Service Principal Object ID for FA-AlgoSec
+  principal_id = "876d5828-6986-4b9c-859c-a30ccb8871aa"
+}
+
+module "subnet_standard_nsg_westus2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+    for_each = try(data.terraform_remote_state.network_data_rg1.outputs.custom_subnets["standard"], {})
+  # for_each = try(local.custom_subnets_rg1["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg1.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_ase_nsg_westus2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg1.outputs.custom_subnets["ase"], {})
+  #for_each = try(local.custom_subnets_rg1["ase"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg1.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_standard_nsg_wcentral" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg6.outputs.custom_subnets["standard"], {})
+  #for_each = try(local.custom_subnets_rg2["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westcentral_rg6.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_ase_nsg_wcentral" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg6.outputs.custom_subnets["ase"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westcentral_rg6.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_westcentral_rg6" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg6.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westcentral_rg6.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_std_nsg_westus2_rg4" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg4.outputs.custom_subnets["standard"], {})
+  #for_each = try(local.custom_subnets_rg4["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg4.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_ase_nsg_westus2_rg4" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg4.outputs.custom_subnets["ase"], {})
+  #for_each = try(local.custom_subnets_rg4["ase"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg4.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_westus2_rg4" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg4.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg4.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_westus2_rg4" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg4.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg4.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_internal_appgw_nsg_westus2_rg4" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg4.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg4.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_mgmt_nsg_eastus" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try({ for k in keys(data.terraform_remote_state.network_data_rg7.outputs.mgmt_subnets) :
+   k => data.terraform_remote_state.network_data_rg7.outputs.mgmt_subnets[k] if ! contains(values(data.terraform_remote_state.network_data_rg7.outputs.mgmt_subnets[k]), "none") }, {})
+
+  #for_each = try({ for k in keys(local.custom_subnets_rg7["mgmt_subnets"]) :
+  #k => local.custom_subnets_rg7.mgmt_subnets[k] if ! contains(values(local.custom_subnets_rg7.mgmt_subnets[k]), "none") }, {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_eastus_rg7.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_mgmt_nsg_rg1" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try({ for k in keys(data.terraform_remote_state.network_data_rg1.outputs.mgmt_subnets) :
+   k => data.terraform_remote_state.network_data_rg1.outputs.mgmt_subnets[k] if ! contains(values(data.terraform_remote_state.network_data_rg1.outputs.mgmt_subnets[k]), "none") }, {})
+
+  #for_each = try({ for k in keys(local.custom_subnets_rg1["mgmt_subnets"]) :
+  #k => local.custom_subnets_rg1.mgmt_subnets[k] if ! contains(values(local.custom_subnets_rg1.mgmt_subnets[k]), "none") }, {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg1.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_std_nsg_eastus_rg7" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg7.outputs.custom_subnets["standard"], {})
+  #for_each = try(local.custom_subnets_rg7["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_eastus_rg7.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_eastus_rg7" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg7.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_eastus_rg7.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_eastus_rg7" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg7.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_eastus_rg7.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_internal_appgw_nsg_eastus_rg7" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg7.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_eastus_rg7.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_mgmt_nsg_wcentral" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try({ for k in keys(data.terraform_remote_state.network_data_rg6.outputs.mgmt_subnets) :
+   k => data.terraform_remote_state.network_data_rg6.outputs.mgmt_subnets[k] if ! contains(values(data.terraform_remote_state.network_data_rg6.outputs.mgmt_subnets[k]), "none") }, {})
+
+  #for_each = try({ for k in keys(local.custom_subnets_rg2["mgmt_subnets"]) :
+  #k => local.custom_subnets_rg2.mgmt_subnets[k] if ! contains(values(local.custom_subnets_rg2.mgmt_subnets[k]), "none") }, {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westcentral_rg6.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+module "subnet_std_nsg_westus2_rg5" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg5.outputs.custom_subnets["standard"], {})
+  #for_each = try(local.custom_subnets_rg5["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg5.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_iappgw_nsg_westus2_rg5" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg5.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg5.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_ase_nsg_westus2_rg5" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg5.outputs.custom_subnets["ase"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg5.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_sqlmi_nsg_westus2_rg5" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg5.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg5.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_westus2_rg5" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg5.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg5.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "custom_subnets_westus2_rg2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg2.outputs.custom_subnets["standard"], {})
+  #for_each = try(local.custom_subnets_rg2th["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg2.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_ase_nsg_RG2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg2.outputs.custom_subnets["ase"], {})
+  #for_each = try(local.custom_subnets_rg2th["ase"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg2.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_RG2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg2.outputs.custom_subnets["sqlmi"], {})
+  #for_each = try(local.custom_subnets_rg2th["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg2.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_mgt_nsg_RG2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try({ for k in keys(data.terraform_remote_state.network_data_rg2.outputs.mgmt_subnets) :
+   k => data.terraform_remote_state.network_data_rg2.outputs.mgmt_subnets[k] if ! contains(values(data.terraform_remote_state.network_data_rg2.outputs.mgmt_subnets[k]), "none") }, {})
+  #for_each = try(local.custom_subnets_rg2th["mgmt_subnets"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg2.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_standard_nsg_westus2_rg8" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg8.outputs.custom_subnets["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg8.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_westus2_rg8" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg8.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg8.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_westus2_rg8" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg8.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg8.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_internal_appgw_nsg_westus2_rg8" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg8.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg8.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_standard_nsg_westus2_rg10" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg10.outputs.custom_subnets["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg10.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_westus2_rg10" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg10.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg10.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_westus2_rg10" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg10.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg10.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_internal_appgw_nsg_westus2_rg10" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg10.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg10.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_standard_nsg_westus2_rg11" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg11.outputs.custom_subnets["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg11.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_westus2_rg11" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg11.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg11.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_westus2_rg11" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg11.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg11.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_internal_appgw_nsg_westus2_rg11" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg11.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg11.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+  module "subnet_standard_nsg_westus2_rg12" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg12.outputs.custom_subnets["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg12.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_westus2_rg12" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg12.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg12.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_westus2_rg12" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg12.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg12.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_internal_appgw_nsg_westus2_rg12" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg12.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg12.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+  module "subnet_standard_nsg_westus2_rg13" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg13.outputs.custom_subnets["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg13.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_westus2_rg13" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg13.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg13.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_westus2_rg13" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg13.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg13.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_internal_appgw_nsg_westus2_rg13" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg13.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg13.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+  module "subnet_standard_nsg_westus2_rg14" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg14.outputs.custom_subnets["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg14.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_westus2_rg14" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg14.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg14.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_westus2_rg14" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg14.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg14.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_internal_appgw_nsg_westus2_rg14" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg14.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg14.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+#################################################
+# AZUR-P-1-AZUR-VN-9 (RG-9, westcentralus)
+#################################################
+
+module "subnet_standard_nsg_wcentral_rg9" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg9.outputs.custom_subnets["standard"], {})
+  #for_each = try(local.custom_subnets_rg2["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westcentral_rg9.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_ase_nsg_wcentral_rg9" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+   for_each = try(data.terraform_remote_state.network_data_rg9.outputs.custom_subnets["ase"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westcentral_rg9.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+module "subnet_iappgw_nsg_wcentral_rg9" {
+  source   = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg9.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westcentral_rg9.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+  }
+
+module "subnet_sqlmi_nsg_wcentral_rg9" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg9.outputs.custom_subnets["sqlmi"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westcentral_rg9.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_wcentral_rg9" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg9.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westcentral_rg9.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_westus2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg1.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg1.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_apim_nsg_westus2_rg2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg2.outputs.custom_subnets["apim"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg2.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_internal_appgw_nsg_westus2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg1.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg1.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_internal_appgw_nsg_westus2_rg2" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg2.outputs.custom_subnets["internal_appgw"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg2.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "monitor_log_alerts" {
+  source            = "git::https://facloud.visualstudio.com/AzureProduct-Modules/_git/activity-log-alerts?ref=v2.0.0"
+
+  resource_group_id = module.resource_group.id
+}
+
+data "terraform_remote_state" "network_data_vnet_99" {
+  backend = "azurerm"
+  config = {
+    key                  = "AZUR-P-1-AZUR-RG-99.tfstate"
+    resource_group_name  = "AZUR-P-1-AZUR-RG-50"
+    storage_account_name = "azuraps1azursa50"
+    container_name       = "tfstate-product"
+    subscription_id      = "e63b08c3-d314-48d8-b10a-c58199bb78b1"
+    tenant_id            = "4cc65fd6-9c76-4871-a542-eb12a5a7800c"
+    use_azuread_auth     = true
+  }
+}
+
+data "azurerm_virtual_network" "vnet_99" {
+  name                = element(split("/", data.terraform_remote_state.network_data_vnet_99.outputs.vnet_id), length(split("/", data.terraform_remote_state.network_data_vnet_99.outputs.vnet_id)) - 1)
+  resource_group_name = data.terraform_remote_state.network_data_vnet_99.outputs.rg_name
+}
+
+module "subnet_recovery_nsg_westus2_rg99" {
+  source   = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_vnet_99.outputs.custom_subnets["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_99.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+
+module "subnet_recovery_nsg_westus2_rg999" {
+  source = "git::https://facloud@dev.azure.com/facloud/AzureProduct-Modules/_git/nsg?ref=v5.0.0"
+  for_each = try(data.terraform_remote_state.network_data_rg999.outputs.custom_subnets["standard"], {})
+
+  resource_group_name        = module.resource_group.name
+  location                   = data.azurerm_virtual_network.vnet_westus2_rg999.location
+  subnet_nsg_type            = each.value.nsg_type
+  subnet_id                  = each.value.id
+  subnet_address_prefix      = each.value.address_prefix
+}
+-----------------------------------------
+  resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: Azure Product/Pipeline.Templates
+      ref: refs/tags/v3.x
+  pipelines:
+    - pipeline: AZUR-P-1-AZUR-RG-1
+      source: AZUR-P-1-AZUR-RG-1
+      trigger:
+        stages:
+          - Apply
+    - pipeline: AZUR-P-1-AZUR-RG-2
+      source: AZUR-P-1-AZUR-RG-2
+      trigger:
+        stages:
+          - Apply
+    - pipeline: AZUR-P-1-AZUR-RG-4
+      source: AZUR-P-1-AZUR-RG-4
+      trigger:
+        stages:
+          - Apply
+    - pipeline: AZUR-P-1-AZUR-RG-5
+      source: AZUR-P-1-AZUR-RG-5
+      trigger:
+        stages:
+          - Apply
+    - pipeline: AZUR-P-1-AZUR-RG-6
+      source: AZUR-P-1-AZUR-RG-6
+      trigger:
+        stages:
+          - Apply
+    - pipeline: AZUR-P-1-AZUR-RG-7
+      source: AZUR-P-1-AZUR-RG-7
+      trigger:
+        stages:
+          - Apply
+    - pipeline: AZUR-P-1-AZUR-RG-8
+      source: AZUR-P-1-AZUR-RG-8
+      trigger:
+        stages:
+          - Apply
+    - pipeline: AZUR-P-1-AZUR-RG-9
+      source: AZUR-P-1-AZUR-RG-9
+      trigger:
+        stages:
+          - Apply
+    - pipeline: AZUR-P-1-AZUR-RG-10
+      source: AZUR-P-1-AZUR-RG-10
+      trigger:
+        stages:
+          - Apply
+
+trigger:
+  branches:
+    include:
+      - master
+  paths:
+    include:
+      - deployments/production/security-monitoring/AZUR-P-1-SOSG-RG-1
+
+parameters:
+  - name: bypassHours
+    type: boolean
+    default: false
+
+stages:
+  - template: terraform-deployment.yml@templates
+    parameters:
+      workingDirectory: deployments/production/security-monitoring/AZUR-P-1-SOSG-RG-1
+      stage: Production
+      bypassHours: ${{ parameters.bypassHours }}
+      terraformVersion: 1.5.7
+---------------------------------------------------------
+  
+                          
+
+
+                          
